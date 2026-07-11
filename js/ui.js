@@ -30,6 +30,7 @@ const UI = (() => {
     screens[name].classList.add('open');
     focusIdx = 0;
     highlight();
+    refreshTouch();
   }
 
   function back() {
@@ -37,12 +38,14 @@ const UI = (() => {
     if (cur) screens[cur].classList.remove('open');
     const prev = current();
     if (prev) { screens[prev].classList.add('open'); focusIdx = 0; highlight(); }
+    refreshTouch();
     return prev;
   }
 
   function closeAll() {
     for (const k of stack) screens[k].classList.remove('open');
     stack = [];
+    refreshTouch();
   }
 
   function isOpen() { return stack.length > 0; }
@@ -131,6 +134,10 @@ const UI = (() => {
       grid.appendChild(card);
       drawVehiclePreview(cv, v.id);
     }
+    if (current() === 'garage') {           // rebuild loses the keyboard focus ring
+      focusIdx = Math.min(focusIdx, Math.max(0, focusables().length - 1));
+      highlight();
+    }
   }
 
   /* ------- level up draft ------- */
@@ -177,12 +184,13 @@ const UI = (() => {
   }
 
   /* ------- touch controls ------- */
+  let touchAvail = false;
   function initTouch(input) {
     if (!('ontouchstart' in window)) return;
-    $('touch').classList.add('on');
+    touchAvail = true;
     const bind = (id, key) => {
       const el = $(id);
-      const on = e => { e.preventDefault(); input[key] = true; el.classList.add('press'); };
+      const on = e => { e.preventDefault(); AUDIO.init(); input[key] = true; el.classList.add('press'); };
       const off = e => { e.preventDefault(); input[key] = false; el.classList.remove('press'); };
       el.addEventListener('touchstart', on, { passive: false });
       el.addEventListener('touchend', off, { passive: false });
@@ -190,7 +198,18 @@ const UI = (() => {
     };
     bind('tLeft', 'left'); bind('tRight', 'right');
     bind('tGas', 'up'); bind('tBrake', 'down'); bind('tBoost', 'boost');
-    $('tPause').addEventListener('touchstart', e => { e.preventDefault(); game.togglePause(); }, { passive: false });
+    $('tPause').addEventListener('touchstart', e => {
+      e.preventDefault();
+      AUDIO.init();
+      if (game.state === 'play' && current() !== 'levelup') game.togglePause();
+    }, { passive: false });
+  }
+
+  /* touch pads only exist while actually driving — over menus they'd both
+     cover the buttons and swallow the taps */
+  function refreshTouch() {
+    if (!touchAvail) return;
+    $('touch').classList.toggle('on', game.state === 'play' && !isOpen());
   }
 
   /* ------- wire everything ------- */
@@ -210,8 +229,19 @@ const UI = (() => {
     click('btn-settings', () => { syncSettings(); show('settings'); });
     click('btn-settings-back', back);
     click('btn-pause-settings', () => { syncSettings(); show('settings'); });
+    let wipeArm = 0;
     click('btn-wipe', () => {
+      const btn = $('btn-wipe');
+      if (Date.now() > wipeArm) {           // first press only arms it
+        wipeArm = Date.now() + 3000;
+        btn.textContent = '⚠ SURE? PRESS AGAIN TO WIPE';
+        setTimeout(() => { if (Date.now() > wipeArm) btn.textContent = '🗑 RESET SAVE DATA'; }, 3200);
+        return;
+      }
+      wipeArm = 0;
+      btn.textContent = '🗑 RESET SAVE DATA';
       game.wipeSave();
+      syncSettings();                        // sliders/checkbox reflect the fresh defaults
       refreshMenuFoot();
       toast('SAVE DATA RESET');
     });
@@ -241,7 +271,7 @@ const UI = (() => {
   }
 
   return {
-    init, show, back, closeAll, isOpen, current, menuKey,
+    init, show, back, closeAll, isOpen, current, menuKey, refreshTouch,
     toast, refreshMenuFoot, buildGarage, showLevelUp, showGameOver, syncSettings,
   };
 })();

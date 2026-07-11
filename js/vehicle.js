@@ -115,10 +115,12 @@ class PlayerCar {
     this.driftAmt = clamp(Math.abs(vr) / 240, 0, 1);
     this.drifting = Math.abs(vr) > 85 && spd > 120;
 
-    // recompose with the (possibly new) heading
-    const c2 = Math.cos(this.heading), s2 = Math.sin(this.heading);
-    this.vx = c2 * vf - s2 * vr;
-    this.vy = s2 * vf + c2 * vr;
+    // recompose with the PRE-steer heading: the nose rotating away from the
+    // velocity vector is exactly what creates lateral slip on the next
+    // step's decomposition — recomposing with the new heading would rotate
+    // velocity in lockstep with the car and no drift could ever happen
+    this.vx = cos * vf - sin * vr;
+    this.vy = sin * vf + cos * vr;
 
     this.x += this.vx * dt;
     this.y += this.vy * dt;

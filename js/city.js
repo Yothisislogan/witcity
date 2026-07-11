@@ -52,9 +52,8 @@ class City {
     this.signFlickers = [];
     this.tumbles = [];
 
-    this.chunks = new Map();
-    this.chunkOrder = [];
-    this.MAX_CHUNKS = 48;
+    this.chunks = new Map();          // insertion order doubles as LRU order
+    this.MAX_CHUNKS = 80;             // ~1MB each; menu attract sweep needs ~50
 
     this.generate(mulberry32(seed));
     this.minimapCache = null;
@@ -194,10 +193,11 @@ class City {
       addProp({ type: 'palm', x: sx, y, r: 13, solid: true, big: true });
     }
 
-    // welcome sign, south of the strip in the desert row
+    // welcome sign, south of the strip in the desert row — solid kept inside
+    // the median footprint so the driving lanes (offset ±60) stay clear
     const wy = 7.42 * G;
     this.landmarks.push({ type: 'welcome', x: sx, y: wy });
-    this.addSolid({ shape: 'circle', x: sx, y: wy, r: 46 });
+    this.addSolid({ shape: 'circle', x: sx, y: wy, r: 32 });
 
     // Fremont-style canopy downtown (overhead — no collision)
     this.landmarks.push({ type: 'canopy', x: 2 * G, y: 2 * G, len: 1.55 * G });
@@ -220,8 +220,10 @@ class City {
     if (kind === 'pyramid') {
       const s = 250;
       this.landmarks.push({ type: 'pyramid', x: cx, y: cy, s });
-      // pyramid collides as a rotated square ≈ circle
-      this.addSolid({ shape: 'circle', x: cx, y: cy, r: s * 0.62 });
+      // diamond footprint ≈ inradius circle + caps on the four points
+      this.addSolid({ shape: 'circle', x: cx, y: cy, r: s * 0.71 });
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]])
+        this.addSolid({ shape: 'circle', x: cx + dx * s * 0.78, y: cy + dy * s * 0.78, r: s * 0.22 });
       this.bucket(bx, by).props.push({ type: 'pyramidBase', x: cx, y: cy, r: s });
     } else if (kind === 'sphere') {
       const r = 165;
@@ -268,8 +270,14 @@ class City {
       addBuilding(b);
       this.signFlickers.push({ x: b.cx, y: b.y + b.h / 2, w: b.w * 0.8, h: 40, c, period: rrange(rng, 2, 7), phase: rng() * 10 });
       if (rng() < 0.35) makeRestaurant(b);
-      // porte-cochère palms by the door
-      addProp({ type: 'palm', x: b.door.x + (b.cx < b.door.x ? -0 : 0), y: b.door.y - 60, r: 11, solid: false });
+      // porte-cochère palm on the sidewalk between the door and the building,
+      // never on the roadway itself
+      addProp({
+        type: 'palm',
+        x: b.door.x + (b.cx - b.door.x) * 0.42,
+        y: b.door.y + (b.cy - b.door.y) * 0.42,
+        r: 11, solid: false,
+      });
     }
   }
 
@@ -358,14 +366,22 @@ class City {
   /* =====================================================================
      CHUNK RENDERING (static scenery, baked once per 512px tile)
      ===================================================================== */
-  getChunk(cx, cy) {
+  /* cached chunk or null — refreshes LRU recency, never renders */
+  peekChunk(cx, cy) {
     const k = cx + ',' + cy;
-    let ch = this.chunks.get(k);
-    if (ch) return ch;
-    ch = this.renderChunk(cx, cy);
-    this.chunks.set(k, ch);
-    this.chunkOrder.push(k);
-    if (this.chunkOrder.length > this.MAX_CHUNKS) this.chunks.delete(this.chunkOrder.shift());
+    const ch = this.chunks.get(k);
+    if (!ch) return null;
+    this.chunks.delete(k); this.chunks.set(k, ch); // move to back = most recent
+    return ch;
+  }
+
+  getChunk(cx, cy) {
+    const hit = this.peekChunk(cx, cy);
+    if (hit) return hit;
+    const ch = this.renderChunk(cx, cy);
+    this.chunks.set(cx + ',' + cy, ch);
+    if (this.chunks.size > this.MAX_CHUNKS)
+      this.chunks.delete(this.chunks.keys().next().value); // evict least recent
     return ch;
   }
 
@@ -704,6 +720,7 @@ class City {
   paintWelcomeSign(ctx, lm) {
     ctx.save();
     ctx.translate(lm.x, lm.y);
+    ctx.scale(0.85, 0.85); // artwork hugs the median like its collision circle
     ctx.fillStyle = 'rgba(0,0,0,.4)';
     ctx.beginPath(); ctx.ellipse(6, 8, 60, 40, 0, 0, TAU); ctx.fill();
     // diamond sign
@@ -876,13 +893,13 @@ class City {
             const on = Math.floor(t * 3 + i) % 2 === 0;
             ctx.fillStyle = on ? '#ffd24a' : 'rgba(255,210,74,.2)';
             ctx.beginPath();
-            ctx.arc(lm.x + Math.cos(a) * 58 * 0.92, lm.y + Math.sin(a) * 64 * 0.92, 3, 0, TAU);
+            ctx.arc(lm.x + Math.cos(a) * 45, lm.y + Math.sin(a) * 50, 3, 0, TAU);
             ctx.fill();
           }
           // twinkle star on top
           const tw = 0.6 + Math.sin(t * 6) * 0.4;
           ctx.save();
-          ctx.translate(lm.x, lm.y - 72);
+          ctx.translate(lm.x, lm.y - 61);
           ctx.rotate(t * 0.8);
           ctx.fillStyle = `rgba(255,240,180,${tw})`;
           ctx.beginPath();

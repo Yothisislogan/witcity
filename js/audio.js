@@ -18,6 +18,7 @@ const AUDIO = (() => {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     ctx = new AC();
+    if (ctx.state === 'suspended') ctx.resume(); // some gestures don't auto-start it
     master = ctx.createGain(); master.gain.value = 0.85; master.connect(ctx.destination);
     musicBus = ctx.createGain(); musicBus.gain.value = musicMuted ? 0 : musicVol; musicBus.connect(master);
     sfxBus = ctx.createGain(); sfxBus.gain.value = sfxVol; sfxBus.connect(master);
@@ -154,6 +155,13 @@ const AUDIO = (() => {
     if (!ctx || !curSong) return;
     const song = SONGS[curSong];
     const stepDur = 60 / song.bpm / 2;
+    // background tabs throttle setInterval while currentTime keeps running;
+    // without this resync every missed step would fire at once on catch-up
+    if (nextStepTime < ctx.currentTime - stepDur) {
+      const behind = Math.ceil((ctx.currentTime - nextStepTime) / stepDur);
+      step += behind;
+      nextStepTime += behind * stepDur;
+    }
     while (nextStepTime < ctx.currentTime + 0.18) {
       const swingShift = (step % 2 === 1) ? stepDur * song.swing : 0;
       scheduleStep(song, Math.max(nextStepTime + swingShift, ctx.currentTime + 0.005), step);

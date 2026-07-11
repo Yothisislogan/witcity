@@ -32,8 +32,9 @@ function newJob(game) {
   const near = ranked.filter(o => o.d > 350 && o.d < 2000 * game.mods.jobDist);
   const rest = (near.length ? choice(near) : ranked[randInt(1, Math.min(6, ranked.length - 1))]).r;
 
-  // dropoff: any other building at a level-scaled distance
-  const minD = 600 + game.level * 60, maxD = 1500 + game.level * 220;
+  // dropoff: any other building at a level-scaled distance (capped — the
+  // built-up area is finite, an ever-growing minimum would starve the loop)
+  const minD = Math.min(600 + game.level * 60, 2400), maxD = 1500 + game.level * 220;
   let target = null;
   for (let tries = 0; tries < 40 && !target; tries++) {
     const b = choice(city.buildings);
@@ -41,7 +42,14 @@ function newJob(game) {
     const d = dist(rest.door.x, rest.door.y, b.door.x, b.door.y);
     if (d > minD && d < maxD) target = b;
   }
-  if (!target) target = choice(city.buildings.filter(b => b !== rest));
+  if (!target) {
+    // fallback still needs real distance, or pickup and drop beacons can
+    // overlap into a zero-drive instant-delivery loop
+    const far = city.buildings.filter(b =>
+      b !== rest && b.kind !== 'restaurant' &&
+      dist(rest.door.x, rest.door.y, b.door.x, b.door.y) > 500);
+    target = far.length ? choice(far) : choice(city.buildings.filter(b => b !== rest));
+  }
 
   const food = choice(rest.foods);
   const runDist = dist(rest.door.x, rest.door.y, target.door.x, target.door.y);

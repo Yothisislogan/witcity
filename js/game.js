@@ -45,7 +45,7 @@ const GAME = {
 
   paused: false,
   time: 0,               // global clock (seconds since boot)
-  crashCd: 0, warnT: 0, waterIn: false,
+  crashCd: 0, bumpCd: 0, warnT: 0, waterIn: false,
   menuLook: { x: 0, y: 0 },
 };
 
@@ -54,13 +54,29 @@ const GAME = {
    ========================================================================= */
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+const IS_TOUCH = 'ontouchstart' in window; // HUD lifts clear of the touch pads
+
+const defaultSave = () => ({
+  high: 0, totalDeliv: 0, totalScore: 0,
+  vehicles: ['moped'], vehicle: 'moped',
+  settings: { music: 0.7, sfx: 0.9, shake: true },
+});
+
+/* merge whatever is on disk over the defaults — a save from an older build
+   (missing fields) must never be able to crash boot into a black screen */
+function normalizeSave(raw) {
+  const d = defaultSave();
+  if (!raw || typeof raw !== 'object') return d;
+  const s = { ...d, ...raw, settings: { ...d.settings, ...(raw.settings || {}) } };
+  if (!Array.isArray(s.vehicles) || !s.vehicles.length) s.vehicles = ['moped'];
+  if (!s.vehicles.includes(s.vehicle)) s.vehicle = s.vehicles[0];
+  for (const k of ['high', 'totalDeliv', 'totalScore'])
+    if (!Number.isFinite(s[k])) s[k] = 0;
+  return s;
+}
 
 function boot() {
-  GAME.save = store.get('witcity_v1', null) || {
-    high: 0, totalDeliv: 0, totalScore: 0,
-    vehicles: ['moped'], vehicle: 'moped',
-    settings: { music: 0.7, sfx: 0.9, shake: true },
-  };
+  GAME.save = normalizeSave(store.get('witcity_v1', null));
   AUDIO.setMusicVol(GAME.save.settings.music);
   AUDIO.setSfxVol(GAME.save.settings.sfx);
 
@@ -73,9 +89,15 @@ function boot() {
   AUDIO.playMusic('menu'); // queued until first gesture unlocks audio
 
   bindKeys();
-  document.addEventListener('pointerdown', () => AUDIO.init(), { once: false });
-  document.addEventListener('keydown', () => AUDIO.init(), { once: true });
-  window.addEventListener('blur', () => { if (GAME.state === 'play' && !UI.isOpen()) GAME.togglePause(); });
+  // not {once}: the first key could be Escape, which grants no activation —
+  // init() is idempotent and resumes a suspended context on later gestures
+  document.addEventListener('pointerdown', () => AUDIO.init());
+  document.addEventListener('keydown', () => AUDIO.init());
+  window.addEventListener('blur', () => {
+    // keyups go to the other app — unlatch everything or the car drives itself on resume
+    for (const k in GAME.input) GAME.input[k] = false;
+    if (GAME.state === 'play' && !UI.isOpen()) GAME.togglePause();
+  });
   document.addEventListener('mousemove', e => {
     GAME.menuLook.x = clamp((e.clientX / window.innerWidth - 0.5) * 2, -1, 1);
     GAME.menuLook.y = clamp((e.clientY / window.innerHeight - 0.5) * 2, -1, 1);
@@ -107,6 +129,9 @@ const KEYMAP = {
 
 function bindKeys() {
   document.addEventListener('keydown', e => {
+    // a focused slider/checkbox owns its keys (arrows, Space) — don't hijack
+    const ae = document.activeElement;
+    if (UI.isOpen() && ae && ae.tagName === 'INPUT') return;
     if (e.repeat) { if (KEYMAP[e.code]) e.preventDefault(); return; }
     // menus swallow navigation keys
     if (UI.isOpen() && UI.menuKey(e)) { e.preventDefault(); return; }
@@ -173,8 +198,10 @@ function liveInput() {
    RUN LIFECYCLE
    ========================================================================= */
 GAME.startRun = function (freeRoam) {
+  if (this.state === 'play') this.bankRun(); // restart mid-run still banks career progress
   const start = this.city.playerStart;
   this.freeRoam = freeRoam;
+  this.statsBanked = false;
   this.car = new PlayerCar(vehicleById(this.save.vehicle), start.x, start.y, start.heading);
   this.mods = freshMods();
   this.taken = [];
@@ -191,16 +218,15 @@ GAME.startRun = function (freeRoam) {
   AUDIO.playMusic('game');
   announce(freeRoam ? 'FREE ROAM — CRUISE!' : 'SHIFT START!', '#ffd24a', 1.6);
   say(choice(QUIPS.start));
+  UI.refreshTouch();
 };
 
-GAME.endRun = function () {
-  this.state = 'over';
-  AUDIO.engineOff();
-  AUDIO.sfx.gameover();
-  AUDIO.playMusic('menu');
+/* fold the run's stats into the persistent save; safe to call once per run
+   from ANY exit path (timer death, quit-to-menu, restart, free roam quit) */
+GAME.bankRun = function () {
+  if (!this.stats || this.statsBanked) return;
+  this.statsBanked = true;
   const s = this.save;
-  const newRecord = this.score > s.high && !this.freeRoam;
-  if (!this.freeRoam) s.high = Math.max(s.high, Math.round(this.score));
   s.totalDeliv += this.stats.deliveries;
   s.totalScore += Math.round(this.score);
   // roguelite meta-unlocks
@@ -212,6 +238,17 @@ GAME.endRun = function () {
     }
   }
   this.persist();
+};
+
+GAME.endRun = function () {
+  this.state = 'over';
+  AUDIO.engineOff();
+  AUDIO.sfx.gameover();
+  AUDIO.playMusic('menu');
+  const s = this.save;
+  const newRecord = this.score > s.high && !this.freeRoam;
+  if (!this.freeRoam) s.high = Math.max(s.high, Math.round(this.score));
+  this.bankRun();
   UI.refreshMenuFoot();
   UI.showGameOver({
     score: Math.round(this.score), newRecord,
@@ -222,6 +259,7 @@ GAME.endRun = function () {
 };
 
 GAME.quitToMenu = function () {
+  if (this.state === 'play') this.bankRun(); // free-roam & abandoned shifts count too
   this.state = 'menu';
   this.paused = false;
   AUDIO.engineOff();
@@ -241,11 +279,9 @@ GAME.togglePause = function () {
 GAME.persist = function () { store.set('witcity_v1', this.save); };
 GAME.wipeSave = function () {
   store.del('witcity_v1');
-  this.save = {
-    high: 0, totalDeliv: 0, totalScore: 0,
-    vehicles: ['moped'], vehicle: 'moped',
-    settings: { music: 0.7, sfx: 0.9, shake: true },
-  };
+  this.save = defaultSave();
+  AUDIO.setMusicVol(this.save.settings.music); // resync live audio to the fresh defaults
+  AUDIO.setSfxVol(this.save.settings.sfx);
   this.persist();
 };
 
@@ -297,12 +333,12 @@ function spawnTrafficCar(cityRef, px, py) {
     const vertical = Math.random() < 0.55;
     let x, y, dir, line;
     if (vertical) {
-      line = clamp(Math.round((px + rand(-1800, 1800)) / c.G), 0, c.N);
+      line = clamp(Math.round((px + rand(-1800, 1800)) / c.G), 1, c.N - 1);
       dir = Math.random() < 0.5 ? 1 : 3;
       x = line * c.G + laneCoord(c, line, true, dir);
       y = clamp(py + rand(-1800, 1800), 100, c.H - 100);
     } else {
-      line = clamp(Math.round((py + rand(-1800, 1800)) / c.G), 0, c.N);
+      line = clamp(Math.round((py + rand(-1800, 1800)) / c.G), 1, c.N - 1);
       dir = Math.random() < 0.5 ? 0 : 2;
       y = line * c.G + laneCoord(c, line, false, dir);
       x = clamp(px + rand(-1800, 1800), 100, c.W - 100);
@@ -361,25 +397,34 @@ function updateTraffic(dt) {
         const newDir = (t.dir + (turnRight ? 1 : 3)) % 4;
         const vertical = newDir === 1 || newDir === 3;
         // snap onto the new line's lane through this intersection
+        // pivot around the car's own lane position — snapping to the road
+        // center would visibly teleport it ~80px sideways mid-turn
         const interX = t.dir % 2 === 0 ? cross : t.line * G;
         const interY = t.dir % 2 === 0 ? t.line * G : cross;
         t.dir = newDir;
         t.line = vertical ? Math.round(interX / G) : Math.round(interY / G);
         if (vertical) {
           t.x = t.line * G + laneCoord(c, t.line, true, newDir);
-          t.y = interY + DIRV[newDir][1] * 40;
+          t.y += DIRV[newDir][1] * 40;
         } else {
           t.y = t.line * G + laneCoord(c, t.line, false, newDir);
-          t.x = interX + DIRV[newDir][0] * 40;
+          t.x += DIRV[newDir][0] * 40;
         }
       }
     }
-    // u-turn at world's edge
-    if (t.x < 60 || t.x > c.W - 60 || t.y < 60 || t.y > c.H - 60) {
+    // u-turn at world's edge — test only the travel-axis coordinate; the
+    // lane offset on rim roads would otherwise trip this every single step
+    const along = t.dir % 2 === 0 ? t.x : t.y;
+    if (along < 70 || along > c.W - 70) {
       t.dir = (t.dir + 2) % 4;
       const vertical = t.dir === 1 || t.dir === 3;
-      if (vertical) t.x = t.line * G + laneCoord(c, t.line, true, t.dir);
-      else t.y = t.line * G + laneCoord(c, t.line, false, t.dir);
+      if (vertical) {
+        t.x = t.line * G + laneCoord(c, t.line, true, t.dir);
+        t.y = clamp(t.y, 72, c.H - 72);
+      } else {
+        t.y = t.line * G + laneCoord(c, t.line, false, t.dir);
+        t.x = clamp(t.x, 72, c.W - 72);
+      }
     }
 
     // collide with player
@@ -431,7 +476,7 @@ function spawnTourist(cityRef, px, py) {
   const c = cityRef;
   for (let tries = 0; tries < 6; tries++) {
     const vertical = Math.random() < 0.5;
-    const line = clamp(Math.round(((vertical ? px : py) + rand(-1200, 1200)) / c.G), 0, c.N);
+    const line = clamp(Math.round(((vertical ? px : py) + rand(-1200, 1200)) / c.G), 1, c.N - 1);
     const side = Math.random() < 0.5 ? -1 : 1;
     const hw = vertical ? c.lineHalfV(line) : c.lineHalfH();
     const along = clamp((vertical ? py : px) + rand(-1200, 1200), 120, c.W - 120);
@@ -503,14 +548,17 @@ function drawTourists(t) {
    ========================================================================= */
 function onImpact(impact) {
   const g = GAME;
-  if (impact < 60 || g.crashCd > 0) return;
+  if (impact < 60) return;
   if (impact < 190) {
+    // light bump — its own debounce, so it can't mask a real crash behind it
+    if (g.crashCd > 0 || g.bumpCd > 0) return;
     AUDIO.sfx.bump();
     shake(impact * 0.02);
-    g.crashCd = 0.25;
+    g.bumpCd = 0.25;
     return;
   }
   // real crash
+  if (g.crashCd > 0) return;
   g.crashCd = 0.5;
   const k = clamp((impact - 190) / 500, 0, 1);
   AUDIO.sfx.crash(k);
@@ -546,7 +594,9 @@ function updatePlay(dt) {
 
   // ---- boost meter ----
   const floor = g.mods.boostFloor; // ghost pepper: fast recharge back to the ember
-  const wantBoost = inp.boost && g.boost > 2;
+  // hysteresis: needs 15% to ignite, then burns down to fumes — otherwise the
+  // on/off state would flicker at ~18Hz when the meter runs dry under Shift
+  const wantBoost = inp.boost && (g.car.boosting ? g.boost > 0.5 : g.boost > 15);
   if (wantBoost && !g.car.boosting) AUDIO.sfx.boostFire();
   g.car.boosting = wantBoost;
   g.car.boostMult = g.mods.boostPow;
@@ -564,6 +614,7 @@ function updatePlay(dt) {
   g.stats.distance += g.car.speed * dt;
   if (ev.impact) onImpact(ev.impact);
   g.crashCd = Math.max(0, g.crashCd - dt);
+  g.bumpCd = Math.max(0, (g.bumpCd || 0) - dt);
 
   // skid marks
   if (g.car.drifting || (inp.brake && g.car.speed > 140)) {
@@ -660,9 +711,11 @@ function completeDelivery(b) {
   g.stats.bestCombo = Math.max(g.stats.bestCombo, g.combo);
   g.stats.deliveries++;
   let total = out.total;
+  let jackpotMult = 1;
 
   // jackpot clause: every 7th delivery triples
   if (g.mods.jackpot && g.stats.deliveries % 7 === 0) {
+    jackpotMult = 3;
     total *= 3;
     announce('🎰 JACKPOT! TRIPLE PAY!', '#ffd24a', 2);
     AUDIO.sfx.unlock();
@@ -671,7 +724,7 @@ function completeDelivery(b) {
 
   g.score += total;
   g.xpInto += total;
-  g.stats.tips += out.tip;
+  g.stats.tips += out.tip * out.comboMult * jackpotMult; // what the player actually earned
 
   // time bonus
   if (!g.freeRoam) {
@@ -684,7 +737,7 @@ function completeDelivery(b) {
   AUDIO.sfx.deliver(g.combo);
   setMood('happy', 2);
   fText(b.x, b.y - 46, `+${fmtMoney(total)}`, '#ffd24a', 24);
-  if (out.tip > 1) fText(b.x + 30, b.y - 20, `tip ${fmtMoney(out.tip * out.comboMult)}`, '#5cff8a', 14);
+  if (out.tip > 1) fText(b.x + 30, b.y - 20, `tip ${fmtMoney(out.tip * out.comboMult * jackpotMult)}`, '#5cff8a', 14);
   if (g.combo > 1) announce(`COMBO x${g.combo}`, '#ff4fd8', 1.1);
   say(choice(QUIPS.deliver));
   burst(b.x, b.y, 26, { colors: ['#ffd24a', '#5cff8a', '#ff4fd8', '#fff'], spMax: 300, type: 'confetti', life: 1.4 });
@@ -792,10 +845,10 @@ function updateCamera(dt) {
     const targetZoom = 1.02 - clamp(g.car.speed / 900, 0, 1) * 0.18 - (g.car.boosting ? 0.03 : 0);
     cam.zoom = damp(cam.zoom, targetZoom, 3, dt);
   } else {
-    // attract mode: drift along the Strip
+    // attract mode: drift along the Strip (sweep sized to fit the chunk cache)
     const t = g.time * 0.05;
     cam.x = g.city.STRIP * g.city.G + Math.sin(t * 0.7) * 300;
-    cam.y = 3.5 * g.city.G + Math.sin(t) * 2200;
+    cam.y = 3.5 * g.city.G + Math.sin(t) * 1300;
     cam.zoom = 0.8;
   }
   cam.shakeAmt = Math.max(0, cam.shakeAmt - 40 * dt);
@@ -822,13 +875,22 @@ function render() {
   ctx.scale(scale, scale);
   ctx.translate(-g.cam.x, -g.cam.y);
 
-  // static chunks
+  // static chunks — bake at most 2 per frame; a fresh column of misses at a
+  // chunk boundary would otherwise stack several 5-15ms bakes in one frame
   const C = g.city.CHUNK;
   const cx0 = Math.floor(view.x / C), cx1 = Math.floor((view.x + view.w) / C);
   const cy0 = Math.floor(view.y / C), cy1 = Math.floor((view.y + view.h) / C);
+  let bakeBudget = 2;
   for (let cy = cy0; cy <= cy1; cy++)
-    for (let cx = cx0; cx <= cx1; cx++)
-      ctx.drawImage(g.city.getChunk(cx, cy), cx * C, cy * C);
+    for (let cx = cx0; cx <= cx1; cx++) {
+      let chunk = g.city.peekChunk(cx, cy);
+      if (!chunk) {
+        if (bakeBudget <= 0) continue;      // stays dark this frame, bakes next
+        bakeBudget--;
+        chunk = g.city.getChunk(cx, cy);
+      }
+      ctx.drawImage(chunk, cx * C, cy * C);
+    }
 
   // skid marks
   ctx.lineCap = 'round';
@@ -933,6 +995,7 @@ function drawBeacon() {
    ========================================================================= */
 function drawHUD(w, h) {
   const g = GAME;
+  const lift = IS_TOUCH ? 128 : 0; // keep bottom HUD visible above the touch pads
   ctx.save();
   ctx.textBaseline = 'alphabetic';
 
@@ -1013,22 +1076,22 @@ function drawHUD(w, h) {
   }
 
   // ---- boost (bottom-center) ----
-  const bw = 190;
+  const bw = 190, by = h - 40 - lift;
   ctx.fillStyle = 'rgba(8,10,24,.75)';
-  roundRect(ctx, w / 2 - bw / 2, h - 40, bw, 16, 8); ctx.fill();
+  roundRect(ctx, w / 2 - bw / 2, by, bw, 16, 8); ctx.fill();
   const bfrac = g.boost / 100;
   const bcol = g.boost > 99 ? '#ffd24a' : '#ff7a3c';
   ctx.fillStyle = bcol;
   ctx.shadowColor = bcol; ctx.shadowBlur = g.boost > 99 ? 12 : 0;
-  if (bfrac > 0.02) { roundRect(ctx, w / 2 - bw / 2 + 2, h - 38, (bw - 4) * bfrac, 12, 6); ctx.fill(); }
+  if (bfrac > 0.02) { roundRect(ctx, w / 2 - bw / 2 + 2, by + 2, (bw - 4) * bfrac, 12, 6); ctx.fill(); }
   ctx.shadowBlur = 0;
   ctx.font = 'bold 12px "Courier New", monospace';
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ffe9c9';
-  ctx.fillText('🔥 NITRO (SHIFT)', w / 2, h - 46);
+  ctx.fillText(IS_TOUCH ? '🔥 NITRO' : '🔥 NITRO (SHIFT)', w / 2, by - 6);
 
   // ---- minimap (bottom-right) ----
-  const mm = 158, mx = w - mm - 16, my = h - mm - 16;
+  const mm = 158, mx = w - mm - 16, my = h - mm - 16 - lift;
   ctx.drawImage(g.city.minimap(mm), mx, my);
   ctx.strokeStyle = 'rgba(53,200,245,.7)';
   ctx.lineWidth = 2;
@@ -1049,21 +1112,22 @@ function drawHUD(w, h) {
   ctx.restore();
 
   // ---- monster portrait + speech (bottom-left) ----
-  MONSTER.drawPortrait(ctx, 66, h - 70, 46, g.time, g.mood,
+  const py2 = h - 70 - lift;
+  MONSTER.drawPortrait(ctx, 66, py2, 46, g.time, g.mood,
     { x: clamp(GAME.car.vx / 600, -1, 1), y: clamp(GAME.car.vy / 600, -1, 1) });
   if (g.quip) {
     ctx.font = 'bold 13px "Courier New", monospace';
     const padX = 10, tw3 = ctx.measureText(g.quip).width + padX * 2;
     ctx.fillStyle = 'rgba(8,10,24,.85)';
-    roundRect(ctx, 124, h - 106, tw3, 30, 8); ctx.fill();
+    roundRect(ctx, 124, py2 - 36, tw3, 30, 8); ctx.fill();
     ctx.strokeStyle = 'rgba(53,200,245,.5)'; ctx.lineWidth = 1.5;
-    roundRect(ctx, 124, h - 106, tw3, 30, 8); ctx.stroke();
+    roundRect(ctx, 124, py2 - 36, tw3, 30, 8); ctx.stroke();
     ctx.beginPath();
-    ctx.moveTo(124, h - 88); ctx.lineTo(114, h - 80); ctx.lineTo(126, h - 84);
+    ctx.moveTo(124, py2 - 18); ctx.lineTo(114, py2 - 10); ctx.lineTo(126, py2 - 14);
     ctx.fillStyle = 'rgba(8,10,24,.85)'; ctx.fill();
     ctx.fillStyle = '#dff6ff';
     ctx.textAlign = 'left';
-    ctx.fillText(g.quip, 124 + padX, h - 86);
+    ctx.fillText(g.quip, 124 + padX, py2 - 16);
   }
 
   // ---- center announcements ----
