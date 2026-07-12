@@ -1153,9 +1153,32 @@ const menuMonsterCanvas = document.getElementById('menuMonster');
 const menuMonsterCtx = menuMonsterCanvas ? menuMonsterCanvas.getContext('2d') : null;
 function drawMenuMonster() {
   if (!menuMonsterCtx) return;
-  const c = menuMonsterCanvas;
-  menuMonsterCtx.clearRect(0, 0, c.width, c.height);
-  MONSTER.drawFull(menuMonsterCtx, c.width / 2, c.height / 2 - 8, 0.88, GAME.time, 'normal', GAME.menuLook);
+  const c = menuMonsterCanvas, g2 = menuMonsterCtx;
+  const mx = c.width / 2, my = c.height / 2 - 8;
+  g2.clearRect(0, 0, c.width, c.height);
+
+  // neon spotlight — the black fur needs something to stand against
+  const pulse = 1 + Math.sin(GAME.time * 1.6) * 0.06;
+  const glow = g2.createRadialGradient(mx, my, 6, mx, my, 118 * pulse);
+  glow.addColorStop(0, 'rgba(255,79,216,.38)');
+  glow.addColorStop(0.55, 'rgba(53,200,245,.18)');
+  glow.addColorStop(1, 'rgba(53,200,245,0)');
+  g2.fillStyle = glow;
+  g2.fillRect(0, 0, c.width, c.height);
+
+  // stage ring under his feet
+  g2.strokeStyle = 'rgba(255,210,74,.55)';
+  g2.lineWidth = 3;
+  g2.shadowColor = '#ffd24a'; g2.shadowBlur = 12;
+  g2.beginPath(); g2.ellipse(mx, my + 74, 76, 13, 0, 0, TAU); g2.stroke();
+  g2.shadowBlur = 0;
+
+  // cyan rim-glow silhouette: every shape he's drawn from casts neon
+  g2.save();
+  g2.shadowColor = 'rgba(53,200,245,.9)';
+  g2.shadowBlur = 20;
+  MONSTER.drawFull(g2, mx, my, 0.88, GAME.time, 'normal', GAME.menuLook);
+  g2.restore();
 }
 
 /* =========================================================================

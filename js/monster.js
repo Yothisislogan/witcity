@@ -6,7 +6,7 @@
 
 const MONSTER = (() => {
   const BLUE = '#35c8f5';
-  const BLACK = '#141418';
+  const BLACK = '#1d1d2a'; // charcoal with a blue cast — pure black vanishes on dark menus
 
   // pre-baked fuzz so the fur doesn't flicker every frame
   const fuzzRng = mulberry32(777);
